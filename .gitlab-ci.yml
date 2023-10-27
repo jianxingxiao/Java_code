@@ -1,0 +1,66 @@
+default:
+  tags:
+    - test # runner 需配置相同tag
+  interruptible: true # 任务可被后来pipeline打断
+
+stages:
+  - upload-mr-analysis
+
+workflow:
+  rules:
+    - if: $CI_MERGE_REQUEST_IID
+
+variables:
+  HUB_LOGIN_NAME: "admin"  # 登录名
+  HUB_PASSWORD: "1234qwer"  # 密码
+  HUB_URL: "http://www.ustchcs.com/p3-v17/hub-backend-test/"  # 平台URL
+  MERGE_REQUEST_PARAM: "{mergeRequestId:$CI_MERGE_REQUEST_IID,projectId:$CI_PROJECT_ID,jobId:$CI_JOB_ID}"
+  JAVA_MAIN_SOURCE: "src/main/java"  #  检索差异文件脚本变量，表示只检查main文件，不检查test文件
+  CAFEHUNTER_CLI_SCRIPT: "/root/analysis-tool/bin/hcscli"  #  套件命令执行文件
+  CAFEHUNTER_CLI_LICENSE_PATH: "/root/analysis-tool/Hub-ci.txt"  #  授权文件
+  CAFEHUNTER_CLI_CONFIG_PATH: "/root/analysis-tool/config.yml"  #  规则配置文件
+  # 根据项目进行配置
+  HUB_PROJECT_ID: "9"  # 对应平台项目Id
+  REPOSITORY_FULL_PATH: "/builds/root/public-java-test"  #  项目绝对路径，供套件分析
+  REPOSITORY_NAME: "public-java-test"  #  项目名称
+
+
+upload-job:
+  stage: upload-mr-analysis
+  # 包含分析工具运行所需环境 
+  # 需要设置 runner config: pull_policy = "if-not-present"
+  # 使用本地镜像，本地需要有这个镜像
+  # 需要设置 runner config：mac_address（固定IP 工具授权需要）
+  image: docker.ustchcs.com/ubuntu-javacli-quality:v3.0
+  allow_failure: false
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  before_script:
+    # 授权
+    - locale-gen zh_CN
+    - export LANG=zh_CN.UTF-8
+    - export LC_ALL=zh_CN.UTF-8
+    - export LANGUAGE=zh_CN.UTF-8
+    - $CAFEHUNTER_CLI_SCRIPT version -i
+    - $CAFEHUNTER_CLI_SCRIPT -k $CAFEHUNTER_CLI_LICENSE_PATH
+    # 将游离分支转换为正常分支 以供套件分析 
+    - cd $REPOSITORY_FULL_PATH
+    - git fetch
+    - git branch tmp-$CI_JOB_ID-$CI_JOB_NAME $CI_COMMIT_SHA
+    - git checkout -b $CI_COMMIT_REF_NAME
+    - git merge tmp-$CI_JOB_ID-$CI_JOB_NAME
+    # 获取分析文件
+    - chmod 777 $REPOSITORY_FULL_PATH/getCommittedMainFilesForCafehunterCli.sh
+    - export COMMITTED_FILES=$($REPOSITORY_FULL_PATH/getCommittedMainFilesForCafehunterCli.sh)
+  script:
+    #  分析
+    - echo "$CAFEHUNTER_CLI_SCRIPT analyze -c $CAFEHUNTER_CLI_CONFIG_PATH $COMMITTED_FILES -umr $REPOSITORY_NAME $HUB_LOGIN_NAME $HUB_PASSWORD $HUB_URL $HUB_PROJECT_ID $MERGE_REQUEST_PARAM"
+    - $CAFEHUNTER_CLI_SCRIPT analyze -c $CAFEHUNTER_CLI_CONFIG_PATH $COMMITTED_FILES -umr $REPOSITORY_NAME $HUB_LOGIN_NAME $HUB_PASSWORD $HUB_URL $HUB_PROJECT_ID $MERGE_REQUEST_PARAM
+    # 删除过程中用到的分支
+    - "git branch -d tmp-$CI_JOB_ID-$CI_JOB_NAME"
+    - "git checkout $CI_COMMIT_SHA"
+    - "git branch -D $CI_COMMIT_REF_NAME"
+  after_script:
+    - "git branch -d tmp-$CI_JOB_ID-$CI_JOB_NAME"
+    - "git checkout $CI_COMMIT_SHA"
+    - "git branch -D $CI_COMMIT_REF_NAME"
